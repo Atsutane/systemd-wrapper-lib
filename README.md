@@ -8,7 +8,35 @@ High level access to libsystemd calls that hides D-Bus communication
 
 ## Requirements and Setup
 
-*Insert a short description what is required to get your project running...*
+systemd-wrapper-lib is an abstraction layer to libsystemd from the [systemd](https://www.freedesktop.org/wiki/Software/systemd/) project
+and therefore we have chosen the library name libsdw for 'systemd wrapper' or 'sd_* function wrapper'.
+It covers a small subset of the systemd [D-Bus API](https://www.freedesktop.org/wiki/Software/systemd/dbus/)
+of libsystemd by abstracting the D-Bus related data types and D-Bus communication.
+The connection to the system bus is created with [sd_bus_open_system()](https://www.freedesktop.org/software/systemd/man/sd_bus_open_system.html#)
+and is held in a single bus connection object.
+libsdw is contained in the source file sdw.cpp, it depends on the libsystemd header files.
+
+If you want to integrate a service in a systemd environment you might have to implement some basic features on top of libsystemd or you can use the following set of functions from libsdw:
+- start/stop/restart/enable/disable a service
+- read/check some service properties, e.g. active/substate
+- trigger a reload of the systemd config
+- wrap sd_notify() calls
+
+sdwc is a simple client for libsdw, that covers most of the libsdw functions and provides a cli.
+
+### How to build and launch
+#### Clone this repo somewhere on your local disk
+ ```sh
+  #> git clone https://github.com/SAP/systemd-wrapper-lib.git
+  ```
+#### Adjust the make file to your needs and build the client
+ ```sh
+  #> make
+  ```
+#### Run the client to get a brief description of the available functions
+```sh
+  #> ./sdwc -h
+  ```
 
 ## Support, Feedback, Contributing
 
