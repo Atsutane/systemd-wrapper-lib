@@ -18,15 +18,25 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <regex.h>
 #include <systemd/sd-bus.h>
 #include <systemd/sd-daemon.h>
+#include <errno.h>
 
 #include "sdw.h"
 
+/* Linux syscall */
+#ifndef __NR_pidfd_open
+#define __NR_pidfd_open 434
+#endif
+
 #define MAX_UNIT_NAME_LEN       64
 #define MAX_RESPONSE_LEN        256
+
+#define SDW_MIN_SYSTEMD_VERSION 234 /* SLES 15.0 GA 234, RHEL 8.0 GA 239 */
+#define SDW_MIN_SYSTEMD_AUXILIARY_SCOPE 256
 
 #define LOG_DEBUG(fmt, ...)                                             \
     do {                                                                \
@@ -59,7 +69,8 @@ typedef struct {
 typedef enum {
     SDBUS_START_UNIT = 0,
     SDBUS_RESTART_UNIT,
-    SDBUS_STOP_UNIT
+    SDBUS_STOP_UNIT,
+    SDBUS_START_AUXILIARY_SCOPE
 } sdbus_cmd_t;
 
 typedef enum {
@@ -88,6 +99,9 @@ typedef union {
 // sd_bus function declarations
 typedef int (*fn_sd_bus_open_system_t)
  (sd_bus ** ret);
+
+typedef sd_bus *(*fn_sd_bus_flush_close_unref_t)
+ (sd_bus * bus);
 
 typedef int (*fn_sd_bus_call_method_t)
  (sd_bus * bus,
@@ -149,6 +163,23 @@ typedef int (*fn_sd_bus_message_enter_container_t)
 typedef int (*fn_sd_bus_message_exit_container_t)
  (sd_bus_message * m);
 
+typedef int (*fn_sd_bus_message_open_container_t)
+ (sd_bus_message *m, char type, const char *contents);
+
+typedef int (*fn_sd_bus_message_close_container_t)
+ (sd_bus_message *m);
+
+typedef int (*fn_sd_bus_message_append_t)
+ (sd_bus_message *m, const char *types, ...);
+
+typedef int (*fn_sd_bus_call_t)
+ (sd_bus *bus, sd_bus_message *m, uint64_t usec,
+  sd_bus_error *ret_error, sd_bus_message **reply);
+
+typedef int (*fn_sd_bus_message_new_method_call_t)
+ (sd_bus *bus, sd_bus_message **m, const char *destination,
+  const char *path, const char *interface, const char *member);
+
 // sd_bus function pointer
 static fn_sd_bus_add_match_t fn_sd_bus_add_match;
 static fn_sd_bus_call_method_t fn_sd_bus_call_method;
@@ -157,6 +188,7 @@ static fn_sd_bus_get_property_t fn_sd_bus_get_property;
 static fn_sd_bus_message_read_t fn_sd_bus_message_read;
 static fn_sd_bus_message_unref_t fn_sd_bus_message_unref;
 static fn_sd_bus_open_system_t fn_sd_bus_open_system;
+static fn_sd_bus_flush_close_unref_t fn_sd_bus_flush_close_unref;
 static fn_sd_bus_path_decode_t fn_sd_bus_path_decode;
 static fn_sd_bus_path_encode_t fn_sd_bus_path_encode;
 static fn_sd_bus_process_t fn_sd_bus_process;
@@ -165,6 +197,11 @@ static fn_sd_bus_wait_t fn_sd_bus_wait;
 static fn_sd_notify_t fn_sd_notify;
 static fn_sd_bus_message_enter_container_t fn_sd_bus_message_enter_container;
 static fn_sd_bus_message_exit_container_t fn_sd_bus_message_exit_container;
+static fn_sd_bus_message_open_container_t fn_sd_bus_message_open_container;
+static fn_sd_bus_message_close_container_t fn_sd_bus_message_close_container;
+static fn_sd_bus_message_append_t fn_sd_bus_message_append;
+static fn_sd_bus_call_t fn_sd_bus_call;
+static fn_sd_bus_message_new_method_call_t fn_sd_bus_message_new_method_call;
 
 #define FN_SD_BUS_ADD_MATCH fn_sd_bus_add_match
 #define FN_SD_BUS_CALL_METHOD fn_sd_bus_call_method
@@ -173,6 +210,7 @@ static fn_sd_bus_message_exit_container_t fn_sd_bus_message_exit_container;
 #define FN_SD_BUS_MESSAGE_READ fn_sd_bus_message_read
 #define FN_SD_BUS_MESSAGE_UNREF fn_sd_bus_message_unref
 #define FN_SD_BUS_OPEN_SYSTEM fn_sd_bus_open_system
+#define FN_SD_BUS_FLUSH_CLOSE_UNREF fn_sd_bus_flush_close_unref
 #define FN_SD_BUS_PATH_DECODE fn_sd_bus_path_decode
 #define FN_SD_BUS_PATH_ENCODE fn_sd_bus_path_encode
 #define FN_SD_BUS_PROCESS fn_sd_bus_process
@@ -181,6 +219,11 @@ static fn_sd_bus_message_exit_container_t fn_sd_bus_message_exit_container;
 #define FN_SD_NOTIFY fn_sd_notify
 #define FN_SD_BUS_MESSAGE_ENTER_CONTAINER fn_sd_bus_message_enter_container
 #define FN_SD_BUS_MESSAGE_EXIT_CONTAINER fn_sd_bus_message_exit_container
+#define FN_SD_BUS_MESSAGE_OPEN_CONTAINER fn_sd_bus_message_open_container
+#define FN_SD_BUS_MESSAGE_CLOSE_CONTAINER fn_sd_bus_message_close_container
+#define FN_SD_BUS_MESSAGE_APPEND fn_sd_bus_message_append
+#define FN_SD_BUS_CALL fn_sd_bus_call
+#define FN_SD_BUS_MESSAGE_NEW_METHOD_CALL fn_sd_bus_message_new_method_call
 
 #else
 
@@ -191,6 +234,7 @@ static fn_sd_bus_message_exit_container_t fn_sd_bus_message_exit_container;
 #define FN_SD_BUS_MESSAGE_READ sd_bus_message_read
 #define FN_SD_BUS_MESSAGE_UNREF sd_bus_message_unref
 #define FN_SD_BUS_OPEN_SYSTEM sd_bus_open_system
+#define FN_SD_BUS_FLUSH_CLOSE_UNREF sd_bus_flush_close_unref
 #define FN_SD_BUS_PATH_DECODE sd_bus_path_decode
 #define FN_SD_BUS_PATH_ENCODE sd_bus_path_encode
 #define FN_SD_BUS_PROCESS sd_bus_process
@@ -199,6 +243,11 @@ static fn_sd_bus_message_exit_container_t fn_sd_bus_message_exit_container;
 #define FN_SD_NOTIFY sd_notify
 #define FN_SD_BUS_MESSAGE_ENTER_CONTAINER sd_bus_message_enter_container
 #define FN_SD_BUS_MESSAGE_EXIT_CONTAINER sd_bus_message_exit_container
+#define FN_SD_BUS_MESSAGE_OPEN_CONTAINER sd_bus_message_open_container
+#define FN_SD_BUS_MESSAGE_CLOSE_CONTAINER sd_bus_message_close_container
+#define FN_SD_BUS_MESSAGE_APPEND sd_bus_message_append
+#define FN_SD_BUS_CALL sd_bus_call
+#define FN_SD_BUS_MESSAGE_NEW_METHOD_CALL sd_bus_message_new_method_call
 
 #endif
 
@@ -222,7 +271,7 @@ static enum { INITIAL = 0, CHECK_VERSION, LOADED, FAILED, INVALID_VERSION
 
 /* static functions */
 static void sdwi_load_lib(void);
-static int sdwi_check_version(const char *version);
+static int sdwi_check_version(const char *version, unsigned min_version);
 static char *sdwi_regex_match(const char *str, const char *pattern,
                                   unsigned want);
 static int sdwi_get_unit_by_pid(unsigned pid, char **ret_unit_name);
@@ -293,6 +342,7 @@ static void sdwi_load_lib(void) {
     DL_FUNCTION(sd_bus_message_read);
     DL_FUNCTION(sd_bus_message_unref);
     DL_FUNCTION(sd_bus_open_system);
+    DL_FUNCTION(sd_bus_flush_close_unref);
     DL_FUNCTION(sd_bus_path_decode);
     DL_FUNCTION(sd_bus_path_encode);
     DL_FUNCTION(sd_bus_process);
@@ -301,6 +351,11 @@ static void sdwi_load_lib(void) {
     DL_FUNCTION(sd_notify);
     DL_FUNCTION(sd_bus_message_enter_container);
     DL_FUNCTION(sd_bus_message_exit_container);
+    DL_FUNCTION(sd_bus_message_open_container);
+    DL_FUNCTION(sd_bus_message_close_container);
+    DL_FUNCTION(sd_bus_message_append);
+    DL_FUNCTION(sd_bus_call);
+    DL_FUNCTION(sd_bus_message_new_method_call);
 
 #undef DL_FUNCTION
 #endif
@@ -320,9 +375,7 @@ static void sdwi_load_lib(void) {
                            sdbus_interface_mgr, "Version", "s", &response);
 
     if (0 == rc && NULL != response.s) {
-
-        rc = sdwi_check_version(response.s);
-
+        rc = sdwi_check_version(response.s, SDW_MIN_SYSTEMD_VERSION);
         if (0 == rc) {
             LOG_INFO("successfully loaded %s\n", sdbus_lib_name);
             lib_stat = LOADED;
@@ -377,7 +430,7 @@ cleanup:
     return sub;
 }
 
-static int sdwi_check_version(const char *version) {
+static int sdwi_check_version(const char *version, unsigned min_version) {
     int rc = SDW_EVERSION;
     char *match = NULL, *end = NULL;
 
@@ -393,8 +446,6 @@ static int sdwi_check_version(const char *version) {
         LOG_DEBUG("systemd version %s\n", version);
 
         if (end != match) {     // valid number ([0-9]+)
-            unsigned min_version = 234; // SLES 15.0 GA 234, RHEL 8.0 GA 239
-
             if (num >= min_version) {
                 LOG_INFO("systemd version %u is supported\n", num);
                 rc = 0;
@@ -1213,6 +1264,203 @@ int sdw_stop(const char *unit_name, unsigned wait_sec) {
 cleanup:
     sdwi_job_remove(&job);
 
+    return rc;
+}
+
+int sdw_pidfd_supported(void) {
+    static bool initialized = false;
+    static int supported = SDW_EVERSION;
+    FILE *fd = NULL;
+    char buf[16];
+    int c = 0;
+
+    /* Doesn't change during runtime, so just search once. */
+    if (initialized)
+       return supported;
+
+    initialized = true;
+
+    c = syscall(__NR_pidfd_open, getpid(), 0);
+    if (c >= 0) {
+        supported = 0;
+        close(c);
+        return supported;
+    }
+
+    if (errno == ENOSYS)
+        return supported;
+
+    /* Long way to a result, the syscall failed but not because it's not implemented */
+    if ((fd=fopen("/proc/kallsyms", "r")) == NULL) {
+        LOG_ERROR("Failed to open /proc/kallsyms: %s (errno: %d)\n", strerror(errno), errno);
+        goto cleanup;
+    }
+
+    while ((c=fgetc(fd)) != EOF) {
+        if ((c == 'p') && (fgets(buf, 10, fd) != NULL)) {
+            if (strncmp("idfd_open", buf, 9) == 0) {
+                supported = 0;
+                break;
+            }
+        }
+    }
+
+cleanup:
+    if (fd != NULL)
+        fclose(fd);
+
+    return supported;
+}
+
+int sdw_auxiliary_scope_supported(void) {
+    char *version = NULL;
+    static bool initialized = false;
+    static int supported = SDW_EVERSION;
+
+    /* While comparision doesn't take much time, it still requires
+     * communication via the bus. */
+    if (initialized)
+        return supported;
+
+    initialized = true;
+
+    /* pidfd_open is required from kernel side */
+    if (sdw_pidfd_supported() != 0) {
+        return supported;
+    }
+
+    if ((sdw_get_version(&version) == 0) &&
+         (sdwi_check_version(version, SDW_MIN_SYSTEMD_AUXILIARY_SCOPE) == 0)) {
+        supported = 0;
+    }
+
+    if (NULL != version)
+        free(version);
+
+    return supported;
+}
+
+
+/*
+ * Problem: Linux Kernel 5.10 required for PIDFD_NONBLOCK,
+ * to keep the outside code downwards compatible conversion of
+ * the pids to descriptors here and not outside.
+ */
+int sdw_start_auxiliary_scope(char *unit_name, int pids_len, pid_t pids[]) {
+    int rc = 0;
+    int rc_job_functions = -1; /* check at end of function, has to be !=0 before it's used */
+    sd_bus_error error = SD_BUS_ERROR_NULL;
+    sd_bus_message *msg = NULL;
+    sd_bus_message *response = NULL;
+    int i = 0;
+    int *pid_fds = NULL;
+    job_info_t job;
+
+    if (unit_name == NULL || unit_name[0] == '\0' || pids_len <=0)
+        return SDW_EINVAL;
+
+    if (sdw_auxiliary_scope_supported() != 0)
+        return SDW_EVERSION;
+
+    if ((pid_fds=(int*)calloc(pids_len,sizeof(int))) == NULL) {
+       LOG_ERROR("Failed to allocate memory: %s (errno: %d)\n", strerror(errno), errno);
+       goto cleanup;
+    }
+
+    for (i=0; i<pids_len; i++) {
+        pid_fds[i] = syscall(__NR_pidfd_open, pids[i], 0);
+        if (pid_fds[i] < 0) {
+            LOG_ERROR("Failed to open pidfd for PID %d: %s (errno: %d)\n", pids[i], strerror(errno), errno);
+            goto cleanup;
+        }
+    }
+    /* cmd is unused, just for readability */
+    job.cmd = SDBUS_START_AUXILIARY_SCOPE;
+    job.wait_sec = 30;
+
+/*
+    StartAuxiliaryScope(in  s name,  in  ah pidfds,
+                          in  t flags, in  a(sv) properties,
+                          out o job);
+*/
+
+    rc = FN_SD_BUS_MESSAGE_NEW_METHOD_CALL(bus, &msg, sdbus_service_contact, sdbus_object_path,
+                               sdbus_interface_mgr, "StartAuxiliaryScope");
+    if (rc < 0) {
+        LOG_ERROR("Failed to create message for new method call - %d\n", rc);
+        goto cleanup;
+    }
+
+    rc = FN_SD_BUS_MESSAGE_APPEND(msg, "s", unit_name);
+    if (rc < 0) {
+        LOG_ERROR("Failed to append unit name to message - %d\n", rc);
+        goto cleanup;
+    }
+
+    rc = FN_SD_BUS_MESSAGE_OPEN_CONTAINER(msg, 'a', "h");
+    if (rc < 0) {
+        LOG_ERROR("Failed to open container for pidfds - %d\n", rc);
+        goto cleanup;
+    }
+
+    for (i=0; i<pids_len; i++) {
+        rc = FN_SD_BUS_MESSAGE_APPEND(msg, "h", pid_fds[i]);
+        if (rc < 0) {
+            LOG_ERROR("Failed to append PIDFD to message (pid %d) - %d\n", pids[i], rc);
+            goto cleanup;
+        }
+    }
+
+    rc = FN_SD_BUS_MESSAGE_CLOSE_CONTAINER(msg);
+    if (rc < 0) {
+        LOG_ERROR("Failed to close PIDFD container - %d\n", rc);
+        goto cleanup;
+    }
+    rc = FN_SD_BUS_MESSAGE_APPEND(msg, "ta(sv)", 0, 1, "Description", "s", "auxiliary scope");
+    if (rc < 0) {
+        LOG_ERROR("Failed to append property Description to message - %d\n", rc);
+        goto cleanup;
+    }
+
+    rc_job_functions = sdwi_job_prepare(&job);
+    if (rc_job_functions != 0) {
+        LOG_ERROR("Failed to prepare systemd job - %d.\n", rc_job_functions);
+    }
+
+
+    rc = FN_SD_BUS_CALL(bus, msg, 0, &error, &response);
+    if (rc < 0) {
+        LOG_ERROR("FN_SD_BUS_CALL failed - %d\n", rc);
+        goto cleanup;
+    }
+
+    rc = FN_SD_BUS_MESSAGE_READ(response, "o", &(job.path));
+    if (rc < 0) {
+        LOG_ERROR("FN_SD_BUS_MESSAGE_READ failed - %d\n", rc);
+        goto cleanup;
+    }
+
+    if (rc_job_functions == 0) {
+        rc = sdwi_job_wait(&job);
+        if (rc != 0) {
+            goto cleanup;
+        }
+    }
+
+cleanup:
+    // path can't be freed
+    job.path = NULL;
+    if (rc_job_functions == 0)
+        sdwi_job_remove(&job);
+    FN_SD_BUS_ERROR_FREE(&error);
+    FN_SD_BUS_MESSAGE_UNREF(msg);
+    if (pid_fds != NULL) {
+        for (i=0;i<pids_len; i++) {
+            if (pid_fds[i] >= 0)
+                close(pid_fds[i]);
+        }
+        free(pid_fds);
+    }
     return rc;
 }
 

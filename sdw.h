@@ -186,6 +186,54 @@ int sdw_restart(const char *unit_name,
 
 
 /*--------------------------------------------------------------------*/
+/* sdw_pidfd_supported()                                              */
+/*                                                                    */
+/** Check whether the kernel supports process descriptors
+ *
+ * @param
+ *
+ * @return
+ *     - #0             successful
+ *     - #SDW_EVERSION  kernel doesn't support the syscall pidfd_open
+ *                                                                    */
+/*--------------------------------------------------------------------*/
+int sdw_pidfd_supported(void);
+
+
+/*--------------------------------------------------------------------*/
+/* sdw_auxiliary_scope_supported()                                    */
+/*                                                                    */
+/** Check whether the kernel supports process descriptors
+ *
+ * @param
+ *
+ * @return
+ *     - #0             successful
+ *     - #SDW_EVERSION  systemd doesn't support StartAuxiliaryScope
+ *                                                                    */
+/*--------------------------------------------------------------------*/
+int sdw_auxiliary_scope_supported(void);
+
+
+/*--------------------------------------------------------------------*/
+/* sdw_start_auxiliary_scope ()                                       */
+/*                                                                    */
+/** Create a auxiliary scope and move the given processes there
+ *
+ * @param  name         name of the scope
+ *         pids_length  number of elements in the pids array
+ *         pids         list of PIDs that shall be moved to the new scope
+ *
+ * @return
+ *     - #0             successful
+ *     - #SDW_EVERSION  invalid systemd version detected
+ *     - #SDW_EINVAL    invalid arguments
+ *                                                                    */
+/*--------------------------------------------------------------------*/
+int sdw_start_auxiliary_scope(char *name, int pids_length, pid_t pids[]);
+
+
+/*--------------------------------------------------------------------*/
 /* sdw_enable ()                                                      */
 /*                                                                    */
 /** Enable the service 'unit_name'

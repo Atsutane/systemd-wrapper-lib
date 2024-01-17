@@ -33,6 +33,23 @@ struct {
     unsigned wait_sec = 0;
 } cfg;
 
+int auxiliary_scope_test(char *unit_name) {
+    const int nr_children = 2;
+    int i = 0;
+    pid_t pids[nr_children], p;
+
+    for (i=0; i<nr_children; i++) {
+        p = fork();
+        if (p == 0) {
+            sleep(300);
+            exit(0);
+        }
+        pids[i] = p;
+        printf("forked process %d\n", p);
+    }
+    return sdw_start_auxiliary_scope(unit_name, nr_children, pids);
+}
+
 static void usage(void) {
     printf("usage:\n"
            "    Start -u <UNIT> [-w <WAIT_SECONDS>]\n"
@@ -52,6 +69,7 @@ static void usage(void) {
            "    Enable -u <UNIT>\n"
            "    Disable -u <UNIT>\n"
            "    Reload\n"
+           "    StartAuxiliaryScope -u <UNIT>\n"
            "    # valid for all commands:\n"
            "      [-v <0-2>]    # verbose (ERROR, INFO, DEBUG)\n");
     exit(1);
@@ -364,6 +382,17 @@ int main(int argc, char **argv) {
             printf("reloaded units\n");
         else
             printf("Reload failed (rc=%d)\n", rc);
+
+        return map_rc(rc);
+    } else if (strcmp(argv[0], "StartAuxiliaryScope") == 0) {
+        if (my_getopt(argc, argv, "u:") != 0)
+            usage();
+
+        rc = auxiliary_scope_test(cfg.unit_name);
+        if (rc >= 0)
+            printf("Started auxiliary scope '%s'\n", cfg.unit_name);
+        else
+            printf("Failed to start auxiliary scope '%s'\n", cfg.unit_name);
 
         return map_rc(rc);
     }
